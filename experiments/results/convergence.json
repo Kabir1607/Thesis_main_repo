@@ -1,0 +1,158 @@
+{
+  "metadata": {
+    "benchmark": "threshold",
+    "N": 9999,
+    "threshold": 50,
+    "mu_truth": 0.0049004900490049,
+    "delta": 0.05,
+    "methods": [
+      "plain_mc",
+      "adaptive_stratified",
+      "pse_exact",
+      "dise_betting"
+    ],
+    "budgets": [
+      500,
+      2000,
+      10000
+    ],
+    "seeds": [
+      0
+    ],
+    "total_wall_s": 0.6454124161973596
+  },
+  "rows": [
+    {
+      "budget": 500,
+      "method": "adaptive_stratified",
+      "n_seeds": 1,
+      "median_mu_hat": 0.004,
+      "median_half_width": 0.057127363742155726,
+      "median_samples_used": 500,
+      "median_wall_s": 0.004856124985963106,
+      "min_half_width": 0.057127363742155726,
+      "max_half_width": 0.057127363742155726
+    },
+    {
+      "budget": 500,
+      "method": "dise_betting",
+      "n_seeds": 1,
+      "median_mu_hat": 0.002,
+      "median_half_width": 0.5,
+      "median_samples_used": 500,
+      "median_wall_s": 0.06505462503992021,
+      "min_half_width": 0.5,
+      "max_half_width": 0.5
+    },
+    {
+      "budget": 500,
+      "method": "plain_mc",
+      "n_seeds": 1,
+      "median_mu_hat": 0.002,
+      "median_half_width": 0.0037218925808839448,
+      "median_samples_used": 500,
+      "median_wall_s": 0.00022074999287724495,
+      "min_half_width": 0.0037218925808839448,
+      "max_half_width": 0.0037218925808839448
+    },
+    {
+      "budget": 500,
+      "method": "pse_exact",
+      "n_seeds": 1,
+      "median_mu_hat": 0.0,
+      "median_half_width": 0.5,
+      "median_samples_used": 500,
+      "median_wall_s": 0.06756029208190739,
+      "min_half_width": 0.5,
+      "max_half_width": 0.5
+    },
+    {
+      "budget": 2000,
+      "method": "adaptive_stratified",
+      "n_seeds": 1,
+      "median_mu_hat": 0.005000000000000001,
+      "median_half_width": 0.020765784846272735,
+      "median_samples_used": 2000,
+      "median_wall_s": 0.01271466608159244,
+      "min_half_width": 0.020765784846272735,
+      "max_half_width": 0.020765784846272735
+    },
+    {
+      "budget": 2000,
+      "method": "dise_betting",
+      "n_seeds": 1,
+      "median_mu_hat": 0.0049004900490049,
+      "median_half_width": 0.0,
+      "median_samples_used": 520,
+      "median_wall_s": 0.1497234171256423,
+      "min_half_width": 0.0,
+      "max_half_width": 0.0
+    },
+    {
+      "budget": 2000,
+      "method": "plain_mc",
+      "n_seeds": 1,
+      "median_mu_hat": 0.005,
+      "median_half_width": 0.0032307575485455943,
+      "median_samples_used": 2000,
+      "median_wall_s": 0.0006500419694930315,
+      "min_half_width": 0.0032307575485455943,
+      "max_half_width": 0.0032307575485455943
+    },
+    {
+      "budget": 2000,
+      "method": "pse_exact",
+      "n_seeds": 1,
+      "median_mu_hat": 0.0049004900490049,
+      "median_half_width": 0.0,
+      "median_samples_used": 503,
+      "median_wall_s": 0.06799220899119973,
+      "min_half_width": 0.0,
+      "max_half_width": 0.0
+    },
+    {
+      "budget": 10000,
+      "method": "adaptive_stratified",
+      "n_seeds": 1,
+      "median_mu_hat": 0.0058,
+      "median_half_width": 0.008323259662132317,
+      "median_samples_used": 10000,
+      "median_wall_s": 0.05517704109661281,
+      "min_half_width": 0.008323259662132317,
+      "max_half_width": 0.008323259662132317
+    },
+    {
+      "budget": 10000,
+      "method": "dise_betting",
+      "n_seeds": 1,
+      "median_mu_hat": 0.0049004900490049,
+      "median_half_width": 0.0,
+      "median_samples_used": 520,
+      "median_wall_s": 0.1504799579270184,
+      "min_half_width": 0.0,
+      "max_half_width": 0.0
+    },
+    {
+      "budget": 10000,
+      "method": "plain_mc",
+      "n_seeds": 1,
+      "median_mu_hat": 0.0057,
+      "median_half_width": 0.0014873945661206048,
+      "median_samples_used": 10000,
+      "median_wall_s": 0.0029360840562731028,
+      "min_half_width": 0.0014873945661206048,
+      "max_half_width": 0.0014873945661206048
+    },
+    {
+      "budget": 10000,
+      "method": "pse_exact",
+      "n_seeds": 1,
+      "median_mu_hat": 0.0049004900490049,
+      "median_half_width": 0.0,
+      "median_samples_used": 503,
+      "median_wall_s": 0.06721283285878599,
+      "min_half_width": 0.0,
+      "max_half_width": 0.0
+    }
+  ]
+}

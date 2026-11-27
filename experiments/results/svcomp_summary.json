@@ -1,0 +1,57 @@
+{
+  "metadata": {
+    "budget": 2000,
+    "delta": 0.05,
+    "seed": 0,
+    "per_cell_seconds": 3.0,
+    "per_program_timeout": 20.0,
+    "mc_truth_budget": 10000,
+    "methods": [
+      "plain_mc",
+      "pse_exact",
+      "dise_betting"
+    ]
+  },
+  "per_method": {
+    "plain_mc": {
+      "n_programs": 125,
+      "median_half_width": 0.00047926182108452267,
+      "p90_half_width": 0.016666830790592613,
+      "median_samples": 2000,
+      "fraction_hw_zero": 0.0,
+      "coverage": 0.984
+    },
+    "pse_exact": {
+      "n_programs": 125,
+      "median_half_width": 0.04164023410859513,
+      "p90_half_width": 0.5,
+      "median_samples": 305,
+      "fraction_hw_zero": 0.384,
+      "coverage": 0.864
+    },
+    "dise_betting": {
+      "n_programs": 125,
+      "median_half_width": 0.0019830831094202733,
+      "p90_half_width": 0.5,
+      "median_samples": 470,
+      "fraction_hw_zero": 0.456,
+      "coverage": 0.832
+    }
+  },
+  "pairwise_dise_vs_each": {
+    "dise_vs_plain_mc": {
+      "n_paired": 125,
+      "dise_wins_hw": 63,
+      "tie_hw": 0,
+      "opponent_wins_hw": 62,
+      "dise_exact_certificate": 57
+    },
+    "dise_vs_pse_exact": {
+      "n_paired": 125,
+      "dise_wins_hw": 46,
+      "tie_hw": 70,
+      "opponent_wins_hw": 9,
+      "dise_exact_certificate": 57
+    }
+  }
+}

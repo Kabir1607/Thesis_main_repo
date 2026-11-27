@@ -1,0 +1,78 @@
+{
+  "metadata": {
+    "epsilon": 0.005,
+    "delta": 0.05,
+    "max_budget": 200000,
+    "dise_budget_seconds": 15,
+    "N": 9999,
+    "methods": [
+      "plain_mc",
+      "dise_betting"
+    ],
+    "rare_widths": [
+      1000,
+      20,
+      1
+    ],
+    "seeds": [
+      0
+    ],
+    "total_wall_clock_s": 30.79000037512742
+  },
+  "rows": [
+    {
+      "rare_width": 1,
+      "mu_truth": 0.00010001000100010001,
+      "method": "dise_betting",
+      "n_seeds": 1,
+      "median_samples": 3020,
+      "median_half_width": 0.4513963188880781,
+      "any_hit_budget": true
+    },
+    {
+      "rare_width": 1,
+      "mu_truth": 0.00010001000100010001,
+      "method": "plain_mc",
+      "n_seeds": 1,
+      "median_samples": 400,
+      "median_half_width": 0.004756147174744205,
+      "any_hit_budget": false
+    },
+    {
+      "rare_width": 20,
+      "mu_truth": 0.002000200020002,
+      "method": "dise_betting",
+      "n_seeds": 1,
+      "median_samples": 640,
+      "median_half_width": 0.0,
+      "any_hit_budget": false
+    },
+    {
+      "rare_width": 20,
+      "mu_truth": 0.002000200020002,
+      "method": "plain_mc",
+      "n_seeds": 1,
+      "median_samples": 400,
+      "median_half_width": 0.004756147174744205,
+      "any_hit_budget": false
+    },
+    {
+      "rare_width": 1000,
+      "mu_truth": 0.1000100010001,
+      "method": "dise_betting",
+      "n_seeds": 1,
+      "median_samples": 44894,
+      "median_half_width": 0.15119037201598434,
+      "any_hit_budget": true
+    },
+    {
+      "rare_width": 1000,
+      "mu_truth": 0.1000100010001,
+      "method": "plain_mc",
+      "n_seeds": 1,
+      "median_samples": 14000,
+      "median_half_width": 0.004988808113000862,
+      "any_hit_budget": false
+    }
+  ]
+}

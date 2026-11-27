@@ -1,0 +1,45 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+venv/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Type-check / lint caches
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Ad-hoc benchmark output at the repo root (not the tracked study
+# under experiments/results/).
+/results/
+*.csv.tmp
+
+# Claude tooling — local to the editor session, not for the repo
+.claude/
+
+# LaTeX build artifacts (sources are tracked under paper/)
+*.aux
+*.log
+*.bbl
+*.blg
+*.out
+*.toc
+
+# Office temp / lock files (Excel, LibreOffice)
+~$*

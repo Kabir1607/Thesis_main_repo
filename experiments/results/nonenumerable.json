@@ -1,0 +1,80 @@
+{
+  "metadata": {
+    "budget": 8000,
+    "delta": 0.05,
+    "epsilon": 0.01,
+    "n_seeds": 5,
+    "mc_truth_n": 8000000,
+    "quick": false,
+    "methods": [
+      "dise",
+      "importance_sampling",
+      "cross_entropy",
+      "sequential_mc"
+    ]
+  },
+  "truths": {
+    "linear_tail": {
+      "mu": 0.005585458640832828,
+      "se": 0.0
+    },
+    "bitwise_tail": {
+      "mu": 0.01620175,
+      "se": 4.4636382717657436e-05
+    }
+  },
+  "per_cell": {
+    "linear_tail": {
+      "dise": {
+        "median_half_width": 0.0,
+        "median_samples": 220,
+        "coverage": 1.0,
+        "certified": true
+      },
+      "importance_sampling": {
+        "median_half_width": 0.0028078545828223635,
+        "median_samples": 8000,
+        "coverage": 1.0,
+        "certified": true
+      },
+      "cross_entropy": {
+        "median_half_width": 0.0029777322221683795,
+        "median_samples": 8000,
+        "coverage": 1.0,
+        "certified": true
+      },
+      "sequential_mc": {
+        "median_half_width": 0.004371642444638929,
+        "median_samples": 1000,
+        "coverage": 1.0,
+        "certified": false
+      }
+    },
+    "bitwise_tail": {
+      "dise": {
+        "median_half_width": 0.0650214199955231,
+        "median_samples": 8000,
+        "coverage": 1.0,
+        "certified": true
+      },
+      "importance_sampling": {
+        "median_half_width": 0.005852156204877976,
+        "median_samples": 8000,
+        "coverage": 1.0,
+        "certified": true
+      },
+      "cross_entropy": {
+        "median_half_width": 0.005298167134075761,
+        "median_samples": 8000,
+        "coverage": 1.0,
+        "certified": true
+      },
+      "sequential_mc": {
+        "median_half_width": 0.008012154420387076,
+        "median_samples": 1000,
+        "coverage": 1.0,
+        "certified": false
+      }
+    }
+  }
+}
