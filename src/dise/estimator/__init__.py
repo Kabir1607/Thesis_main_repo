@@ -39,17 +39,62 @@ class EstimatorState:
     n_leaves: int
     n_open_leaves: int
     n_closed_leaves: int
+    # Which construction produced ``interval`` (``"ais_betting"`` uses the
+    # explicit asymmetric Definition-6 assembly; see compute_estimator_state).
+    method: str = "wilson"
+    # Optional SLA-threshold decision on the failure rate ``1 - mu``:
+    # ``"VERIFIED"`` (1 - lo <= tau), ``"FALSIFIED"`` (1 - hi > tau),
+    # ``"UNDECIDED"``; ``None`` when no threshold was supplied.
+    threshold_tau: float | None = None
+    decision: str | None = None
+    # Number of OPEN leaves whose per-leaf bound came from an AIS /
+    # off-policy betting CS (``"ais_betting"`` only).
+    n_ais_leaves: int = 0
+
+    @property
+    def lo(self) -> float:
+        """Certified lower bound on ``mu`` (reliability)."""
+        return self.interval[0]
+
+    @property
+    def hi(self) -> float:
+        """Certified upper bound on ``mu`` (reliability)."""
+        return self.interval[1]
+
+    @property
+    def half_width(self) -> float:
+        return (self.interval[1] - self.interval[0]) / 2.0
 
     def __repr__(self) -> str:
         lo, hi = self.interval
+        extra = f", decision={self.decision}" if self.decision is not None else ""
         return (
             f"EstimatorState(mu_hat={self.mu_hat:.4f}, "
             f"interval=[{lo:.4f}, {hi:.4f}], "
             f"eps_stat={self.eps_stat:.4g}, W_open={self.W_open:.4g}, "
             f"delta={self.delta}, "
             f"samples={self.n_total_samples}, "
-            f"leaves={self.n_leaves} (open={self.n_open_leaves}, closed={self.n_closed_leaves}))"
+            f"leaves={self.n_leaves} (open={self.n_open_leaves}, closed={self.n_closed_leaves})"
+            f"{extra})"
         )
+
+
+def threshold_decision(interval: tuple[float, float], tau: float | None) -> str | None:
+    """SLA decision on the failure rate ``1 - mu`` from a reliability
+    interval ``[lo, hi]``.
+
+    * ``"VERIFIED"``  iff ``1 - lo <= tau`` (failure rate certified ``<= tau``);
+    * ``"FALSIFIED"`` iff ``1 - hi > tau``  (failure rate certified ``> tau``);
+    * ``"UNDECIDED"`` otherwise.
+    """
+    if tau is None:
+        return None
+    lo, hi = interval
+    if 1.0 - lo <= tau:
+        return "VERIFIED"
+    if 1.0 - hi > tau:
+        return "FALSIFIED"
+    return "UNDECIDED"
 
 
 def bernstein_halfwidth(
@@ -374,12 +419,123 @@ def _phi_inv_one_sided(p: float) -> float:
     ) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0)
 
 
+def _compute_ais_state(
+    frontier: Frontier,
+    delta: float,
+    k_max: int,
+    threshold_tau: float | None,
+) -> EstimatorState:
+    """Definition-6 assembly with explicit asymmetric per-leaf bounds.
+
+    .. math::
+
+        L &= \\max\\Big(0, \\sum_{\\text{CLOSED-T}} \\hat w_\\pi
+              + \\sum_{\\text{OPEN, bounded}} \\hat w_\\pi L_\\pi - \\beta\\Big) \\\\
+        U &= \\min\\Big(1, \\sum_{\\text{CLOSED-T}} \\hat w_\\pi
+              + \\sum_{\\text{OPEN, bounded}} \\hat w_\\pi U_\\pi
+              + \\sum_{\\text{OPEN, unbounded}} \\hat w_\\pi + \\beta\\Big)
+
+    ``[L_pi, U_pi] = [1 - U_fail, 1 - L_fail]`` comes straight from the
+    leaf's :class:`~dise.ais.OffPolicyBettingCS` (never ``mu_hat +/- W``).
+    A leaf is *bounded* when it carries a CS with at least one
+    observation; unsampled leaves, and leaves past the ``K_max`` CS
+    budget, contribute the vacuous ``[0, 1]``.  ``beta`` is the inherited
+    mass-uncertainty term (zero on enumerable / axis-aligned frontiers).
+
+    Reported fields: ``W_open`` is the mass of *unbounded* open leaves;
+    ``eps_stat`` is ``sum w_pi (U_pi - L_pi) / 2`` over bounded open
+    leaves; ``eps_mass`` is ``beta``.
+    """
+    leaves = frontier.leaves()
+    open_leaves = [n for n in leaves if n.status == Status.OPEN]
+    closed_leaves = [
+        n for n in leaves if n.status in (Status.CLOSED_TRUE, Status.CLOSED_FALSE)
+    ]
+    empty_leaves = [n for n in leaves if n.status == Status.EMPTY]
+    n_total_samples = sum(n.n_samples for n in leaves)
+    delta_pi = delta / max(1, k_max)
+
+    lo_sum = 0.0
+    hi_sum = 0.0
+    mu_hat = 0.0
+    variance = 0.0
+    eps_stat = 0.0
+    W_unbounded = 0.0
+    n_ais = 0
+    for leaf in closed_leaves:
+        if leaf.status == Status.CLOSED_TRUE:
+            lo_sum += leaf.w_hat
+            hi_sum += leaf.w_hat
+            mu_hat += leaf.w_hat
+        variance += leaf.variance_contribution
+    for leaf in open_leaves:
+        w = leaf.w_hat
+        cs = leaf.ais_cs
+        if cs is not None and cs.n > 0:
+            L_pi, U_pi = cs.reliability_bounds()
+            lo_sum += w * L_pi
+            hi_sum += w * U_pi
+            mu_hat += w * (1.0 - cs.point_estimate)
+            eps_stat += w * (U_pi - L_pi) / 2.0
+            if leaf.n_ais_samples > 0:
+                n_ais += 1
+        else:
+            hi_sum += w
+            W_unbounded += w
+            mu_hat += w * leaf.mu_hat
+        variance += leaf.variance_contribution
+
+    # beta: mass uncertainty of non-enumerable leaves (inherited
+    # asymptotic z * sqrt(w_var) term, at the fixed per-leaf delta).
+    mass_var_leaves = [
+        leaf
+        for leaf in leaves
+        if leaf.status in (Status.CLOSED_TRUE, Status.OPEN) and leaf.w_var > 0.0
+    ]
+    if mass_var_leaves:
+        z = _phi_inv_one_sided(1.0 - delta_pi / 2.0)
+        beta = min(1.0, sum(z * math.sqrt(leaf.w_var) for leaf in mass_var_leaves))
+    else:
+        beta = 0.0
+
+    lo = max(0.0, lo_sum - beta)
+    hi = min(1.0, hi_sum + beta)
+    if lo > hi:  # numerical guard only
+        lo = hi = 0.5 * (lo + hi)
+    interval = (lo, hi)
+    return EstimatorState(
+        mu_hat=mu_hat,
+        variance=variance,
+        eps_stat=min(eps_stat, 1.0),
+        eps_mass=beta,
+        W_open=W_unbounded,
+        delta=delta,
+        interval=interval,
+        n_total_samples=n_total_samples,
+        n_leaves=len(leaves) - len(empty_leaves),
+        n_open_leaves=len(open_leaves),
+        n_closed_leaves=len(closed_leaves),
+        method="ais_betting",
+        threshold_tau=threshold_tau,
+        decision=threshold_decision(interval, threshold_tau),
+        n_ais_leaves=n_ais,
+    )
+
+
 def compute_estimator_state(
     frontier: Frontier,
     delta: float,
     method: Literal[
-        "bernstein", "wilson", "empirical-bernstein", "anytime", "betting"
+        "bernstein",
+        "wilson",
+        "empirical-bernstein",
+        "anytime",
+        "betting",
+        "betting_strict",
+        "ais_betting",
     ] = "wilson",
+    k_max: int | None = None,
+    threshold_tau: float | None = None,
 ) -> EstimatorState:
     """Compute the certified estimator state from the current frontier.
 
@@ -407,10 +563,31 @@ def compute_estimator_state(
       bound. Tighter than ``"bernstein"`` when per-leaf empirical
       variance is available.
 
+    * ``"betting_strict"`` (opt-in fix of ``"betting"``) — same PrPl-EB
+      half-widths, but (i) each open leaf is centred at the WSR
+      predictable-plug-in mean :func:`prpl_eb_center` (Theorem 2's actual
+      centre) rather than the plain hit rate, and (ii) the per-leaf budget
+      is the fixed a-priori ``delta / k_max`` instead of the dynamic
+      ``delta / K_bounds`` (which retroactively changes past bets as the
+      frontier grows).  ``"betting"`` itself is left untouched so A/B
+      comparisons against published numbers stay clean.
+    * ``"ais_betting"`` — Definition-6 assembly with explicit asymmetric
+      per-leaf bounds from each leaf's off-policy betting CS (certified
+      AIS); see :func:`_compute_ais_state`.
+
+    ``k_max`` (default 1024) fixes the per-leaf budget for
+    ``"betting_strict"`` and ``"ais_betting"``.  ``threshold_tau``, when
+    given, attaches a VERIFIED / FALSIFIED / UNDECIDED decision on the
+    failure rate ``1 - mu`` (any method).
+
     Returns an :class:`EstimatorState` snapshot. When the frontier is
     fully resolved (no open leaves, all masses closed-form), ``eps_stat``
     is exactly 0.
     """
+    if method == "ais_betting":
+        return _compute_ais_state(
+            frontier, delta, k_max if k_max is not None else 1024, threshold_tau
+        )
     # Single frontier walk: derive every per-status list, plus mu_hat,
     # variance, and W_open, from one ``leaves()`` traversal. Calling
     # ``frontier.compute_mu_hat()`` and ``frontier.open_mass()`` would
@@ -491,6 +668,18 @@ def compute_estimator_state(
             leaf.w_hat * prpl_eb_halfwidth_anytime(leaf.observed_phis, delta_per_leaf)
             for leaf in open_leaves
         )
+    elif method == "betting_strict":
+        delta_per_leaf = delta / max(1, k_max if k_max is not None else 1024)
+        eps_stat = 0.0
+        for leaf in open_leaves:
+            eps_stat += leaf.w_hat * prpl_eb_halfwidth_anytime(
+                leaf.observed_phis, delta_per_leaf
+            )
+            # Re-centre: swap the plain hit rate for the WSR PrPl centre.
+            if leaf.n_samples > 0:
+                mu_hat += leaf.w_hat * (
+                    prpl_eb_center(leaf.observed_phis, delta_per_leaf) - leaf.mu_hat
+                )
     else:
         raise ValueError(f"unknown method: {method!r}")
     eps_stat = min(eps_stat, 1.0)
@@ -514,6 +703,9 @@ def compute_estimator_state(
     hi = min(1.0, mu_hat + eps_stat + W_open + eps_mass)
 
     return EstimatorState(
+        method=method,
+        threshold_tau=threshold_tau,
+        decision=threshold_decision((lo, hi), threshold_tau),
         mu_hat=mu_hat,
         variance=variance,
         eps_stat=eps_stat,
@@ -535,6 +727,7 @@ __all__ = [
     "empirical_bernstein_halfwidth_mp",
     "prpl_eb_center",
     "prpl_eb_halfwidth_anytime",
+    "threshold_decision",
     "wilson_halfwidth_anytime",
     "wilson_halfwidth_for_leaf",
 ]

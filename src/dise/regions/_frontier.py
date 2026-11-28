@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -56,6 +57,28 @@ class FrontierNode:
 
     children: list[FrontierNode] = field(default_factory=list)
 
+    # ---- Optional certified-AIS state (dise.ais) ----
+    # All default to "off": baseline DiSE never sets them, so every
+    # property below behaves exactly as before unless AIS is enabled.
+    # ``ais_cs`` is an OffPolicyBettingCS, ``ais_proposal`` a
+    # TwistedBGProposal (typed loosely to avoid an import cycle).
+    ais_cs: Any | None = None
+    ais_proposal: Any | None = None
+    # Sticky flag: the scheduler decided Z3 cannot close this leaf
+    # (concretized trace, solver ``unknown``, or no symbolic clause left
+    # to refine on).  Only meaningful when AIS is enabled.
+    is_unclosable: bool = False
+    # Number of closure attempts on which the SMT backend answered
+    # ``"unknown"`` (diagnostic; also an unclosability signal).
+    closure_unknown_count: int = 0
+    # Failing AIS samples (inputs, shape (d,)) and their importance
+    # weights, used by the predictable cross-entropy proposal update.
+    ais_fail_x: list[np.ndarray] = field(default_factory=list)
+    ais_fail_w: list[float] = field(default_factory=list)
+    # Number of observations drawn from the AIS proposal (as opposed
+    # to plain ``D|_R`` draws).
+    n_ais_samples: int = 0
+
     @property
     def is_leaf(self) -> bool:
         return len(self.children) == 0
@@ -71,6 +94,10 @@ class FrontierNode:
             return 1.0
         if self.status in (Status.CLOSED_FALSE, Status.EMPTY):
             return 0.0
+        if self.ais_cs is not None and self.ais_cs.n > 0:
+            # AIS leaves: importance-weighted estimate (raw n_hits / n is
+            # biased once samples come from the proposal q != D|_R).
+            return 1.0 - self.ais_cs.point_estimate
         if self.n_samples == 0:
             return 0.5
         return self.n_hits / self.n_samples
@@ -120,6 +147,13 @@ class FrontierNode:
         self.observed_sequences.clear()
         self.observed_phis.clear()
         self.observed_paths.clear()
+        # AIS state is tied to the (now refined) region: drop it so
+        # post-refinement statistics start fresh.
+        self.ais_cs = None
+        self.ais_proposal = None
+        self.ais_fail_x.clear()
+        self.ais_fail_w.clear()
+        self.n_ais_samples = 0
 
 
 class Frontier:
@@ -477,6 +511,8 @@ class Frontier:
             node.region.formula, self.smt.negation(path_formula)
         )
         result = self.smt.is_satisfiable(check)
+        if result == "unknown":
+            node.closure_unknown_count += 1
         if result != "unsat":
             # ``"sat"`` (counterexample) or ``"unknown"`` (backend can't
             # decide) — neither certifies path-determinism. Keep open.

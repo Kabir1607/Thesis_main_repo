@@ -42,6 +42,10 @@ class EstimationResult:
     n_closed_leaves: int
     terminated_reason: str
     iterations: list[IterationLog] = field(repr=False, default_factory=list)
+    # Certified-AIS diagnostics (zero / None unless AIS or a threshold is used).
+    ais_samples_used: int = 0
+    decision: str | None = None
+    threshold_tau: float | None = None
 
     @property
     def half_width(self) -> float:
@@ -69,7 +73,13 @@ def estimate(
     budget_seconds: float | None = None,
     min_gain_per_cost: float = 0.0,
     method: Literal[
-        "wilson", "anytime", "betting", "bernstein", "empirical-bernstein"
+        "wilson",
+        "anytime",
+        "betting",
+        "betting_strict",
+        "ais_betting",
+        "bernstein",
+        "empirical-bernstein",
     ] = "wilson",
     bootstrap: int = 200,
     batch_size: int = 50,
@@ -79,6 +89,11 @@ def estimate(
     max_refinement_depth: int = 50,
     closure_min_samples: int = 5,
     max_concolic_branches: int = 10_000,
+    enable_ais: bool = False,
+    ais_alpha: float = 0.5,
+    ais_k_max: int = 1024,
+    ais_mode: Literal["two_sided", "falsify", "verify"] = "two_sided",
+    threshold_tau: float | None = None,
 ) -> EstimationResult:
     r"""Run DiSE on ``program`` against ``property_fn`` under ``distribution``.
 
@@ -143,6 +158,26 @@ def estimate(
         at the cost of slightly delayed closure.
     max_concolic_branches:
         Per-run cap on the number of branches the concolic tracer records.
+    enable_ais:
+        Opt-in certified adaptive importance sampling inside OPEN leaves
+        that Z3 cannot close (also enabled by ``method="ais_betting"``).
+        Switches the certified interval to the Definition-6 assembly with
+        explicit asymmetric per-leaf bounds; see :mod:`dise.ais`.
+    ais_alpha:
+        Defensive mixture weight on ``D|_R`` (weights are capped at
+        ``1/ais_alpha``).  ~0.1 favours falsification (certified lower
+        bounds on the failure rate), ~0.9 favours verification (upper
+        bounds); 0.5 is a two-sided compromise.
+    ais_k_max:
+        Fixed a-priori number of per-leaf confidence sequences; each uses
+        ``delta / ais_k_max``.
+    ais_mode:
+        ``"two_sided"``, ``"falsify"`` (all of each leaf's delta on the
+        lower failure bound) or ``"verify"`` (all on the upper bound).
+    threshold_tau:
+        Optional SLA threshold on the failure rate ``1 - mu``: stop as
+        soon as it is certified ``<= tau`` (``decision="VERIFIED"``) or
+        ``> tau`` (``decision="FALSIFIED"``).  Works with every method.
 
     Returns
     -------
@@ -171,6 +206,11 @@ def estimate(
         closure_min_samples=closure_min_samples,
         max_concolic_branches=max_concolic_branches,
         verbose=verbose,
+        enable_ais=enable_ais,
+        ais_alpha=ais_alpha,
+        ais_k_max=ais_k_max,
+        ais_mode=ais_mode,
+        threshold_tau=threshold_tau,
     )
     scheduler = ASIPScheduler(
         program=program,
@@ -195,6 +235,9 @@ def estimate(
         n_closed_leaves=state.n_closed_leaves,
         terminated_reason=sched_result.terminated_reason,
         iterations=sched_result.iterations,
+        ais_samples_used=sched_result.ais_samples_used,
+        decision=sched_result.decision,
+        threshold_tau=threshold_tau,
     )
 
 
@@ -209,7 +252,13 @@ def failure_probability(
     budget_seconds: float | None = None,
     min_gain_per_cost: float = 0.0,
     method: Literal[
-        "wilson", "anytime", "betting", "bernstein", "empirical-bernstein"
+        "wilson",
+        "anytime",
+        "betting",
+        "betting_strict",
+        "ais_betting",
+        "bernstein",
+        "empirical-bernstein",
     ] = "wilson",
     bootstrap: int = 200,
     batch_size: int = 50,
@@ -219,6 +268,11 @@ def failure_probability(
     max_refinement_depth: int = 50,
     closure_min_samples: int = 5,
     max_concolic_branches: int = 10_000,
+    enable_ais: bool = False,
+    ais_alpha: float = 0.5,
+    ais_k_max: int = 1024,
+    ais_mode: Literal["two_sided", "falsify", "verify"] = "two_sided",
+    threshold_tau: float | None = None,
 ) -> EstimationResult:
     r"""Estimate :math:`\Pr_D[P \text{ raises an exception of type } \texttt{catch}]`.
 
@@ -270,6 +324,43 @@ def failure_probability(
         except catch:
             return 1  # failure
 
+    # Sign convention.  This wrapper's property is ``v == 1`` (phi = 1 on
+    # FAILURE), so its ``mu`` is the failure probability -- the opposite
+    # of DiSE's PASS convention that AIS (R = 1 - phi is the failure
+    # indicator) and the SLA threshold (a bound on 1 - mu) rely on.  When
+    # either is requested, run on the PASS property and map the result
+    # back to failure-probability space; baseline calls are unchanged.
+    flip = enable_ais or method == "ais_betting" or threshold_tau is not None
+    if flip:
+        res = estimate(
+            program=wrapped,
+            distribution=distribution,
+            property_fn=lambda v: v == 0,
+            epsilon=epsilon,
+            delta=delta,
+            budget=budget,
+            budget_seconds=budget_seconds,
+            min_gain_per_cost=min_gain_per_cost,
+            method=method,
+            bootstrap=bootstrap,
+            batch_size=batch_size,
+            seed=seed,
+            backend=backend,
+            verbose=verbose,
+            max_refinement_depth=max_refinement_depth,
+            closure_min_samples=closure_min_samples,
+            max_concolic_branches=max_concolic_branches,
+            enable_ais=enable_ais,
+            ais_alpha=ais_alpha,
+            ais_k_max=ais_k_max,
+            ais_mode=ais_mode,
+            threshold_tau=threshold_tau,
+        )
+        lo, hi = res.interval
+        res.mu_hat = 1.0 - res.mu_hat
+        res.interval = (1.0 - hi, 1.0 - lo)
+        return res
+
     return estimate(
         program=wrapped,
         distribution=distribution,
@@ -288,6 +379,11 @@ def failure_probability(
         max_refinement_depth=max_refinement_depth,
         closure_min_samples=closure_min_samples,
         max_concolic_branches=max_concolic_branches,
+        enable_ais=enable_ais,
+        ais_alpha=ais_alpha,
+        ais_k_max=ais_k_max,
+        ais_mode=ais_mode,
+        threshold_tau=threshold_tau,
     )
 
 

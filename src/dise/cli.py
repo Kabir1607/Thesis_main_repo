@@ -230,8 +230,8 @@ def make_parser() -> argparse.ArgumentParser:
     pr.add_argument("--min-gain-per-cost", type=float, default=0.0,
                     help="diminishing-returns floor (default 0)")
     pr.add_argument("--method", type=str, default="wilson",
-                    choices=["wilson", "anytime", "betting",
-                             "bernstein", "empirical-bernstein"],
+                    choices=["wilson", "anytime", "betting", "betting_strict",
+                             "ais_betting", "bernstein", "empirical-bernstein"],
                     help="certified half-width construction (default 'wilson'; "
                          "'betting' for ATVA-grade soundness under adaptive "
                          "stopping with the tightest available bounds)")

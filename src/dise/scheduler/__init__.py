@@ -76,7 +76,13 @@ class SchedulerConfig:
     # ``"anytime"`` but tighter in low-variance regimes; the
     # recommended setting for ATVA-style certificates.
     method: Literal[
-        "wilson", "anytime", "betting", "bernstein", "empirical-bernstein"
+        "wilson",
+        "anytime",
+        "betting",
+        "betting_strict",
+        "ais_betting",
+        "bernstein",
+        "empirical-bernstein",
     ] = "wilson"
     bootstrap_samples: int = 200
     batch_size: int = 50
@@ -87,6 +93,40 @@ class SchedulerConfig:
     closure_min_samples: int = 5
     max_concolic_branches: int = 10_000
     verbose: bool = False
+
+    # ---- Certified AIS (opt-in; see dise.ais) ----
+    # ``enable_ais=True`` or ``method="ais_betting"`` switches on AIS
+    # inside unclosable OPEN leaves *and* the Definition-6 asymmetric
+    # estimator.  With both off, behaviour is exactly the baseline.
+    enable_ais: bool = False
+    # Defensive mixture weight on D|_R (W <= 1 / ais_alpha).  Suggested:
+    # 0.5 two-sided, 0.1 falsification, 0.9 verification.
+    ais_alpha: float = 0.5
+    # Fixed a-priori number of per-leaf confidence sequences; each gets
+    # delta_pi = delta / ais_k_max.  Leaves beyond the budget get [0, 1].
+    ais_k_max: int = 1024
+    # Error-budget split of each leaf CS: two-sided, all on the lower
+    # failure bound ("falsify"), or all on the upper ("verify").
+    ais_mode: Literal["two_sided", "falsify", "verify"] = "two_sided"
+    # Optional SLA threshold on the failure rate 1 - mu.  Stops early on
+    # VERIFIED (1 - lo <= tau) or FALSIFIED (1 - hi > tau).  Applies to
+    # every method (default None: disabled).
+    threshold_tau: float | None = None
+    # CE smoothing: eta <- (1 - rho) eta + rho eta_CE.
+    ais_ce_rho: float = 0.7
+    # Samples per AIS batch (proposal updated between batches);
+    # ``None`` -> ``batch_size``.
+    ais_batch_size: int | None = None
+    # Mark a leaf unclosable after this many ``unknown`` SMT closure answers.
+    ais_unknown_threshold: int = 2
+
+    @property
+    def ais_enabled(self) -> bool:
+        return self.enable_ais or self.method == "ais_betting"
+
+    @property
+    def estimator_method(self) -> str:
+        return "ais_betting" if self.ais_enabled else self.method
 
 
 @dataclass
@@ -112,6 +152,10 @@ class SchedulerResult:
     smt_calls: int
     terminated_reason: str
     frontier: Frontier
+    # Concolic runs drawn from an AIS proposal (subset of samples_used).
+    ais_samples_used: int = 0
+    # Final SLA decision when ``threshold_tau`` was configured.
+    decision: str | None = None
 
     def __repr__(self) -> str:
         lo, hi = self.final_estimator.interval
@@ -130,7 +174,7 @@ class SchedulerResult:
 
 @dataclass
 class _Action:
-    kind: Literal["allocate", "refine"]
+    kind: Literal["allocate", "refine", "ais_allocate"]
     leaf: FrontierNode
     expected_gain: float
     cost: float
@@ -181,6 +225,21 @@ class ASIPScheduler:
         # refinement clauses). Scheduler-local; not part of Frontier state.
         self._leaf_paths: dict[int, list[list[BranchRecord]]] = {}
         self._leaf_path_phis: dict[int, list[int]] = {}
+        # ---- AIS bookkeeping (inactive unless config.ais_enabled) ----
+        self._ais = config.ais_enabled
+        # Per-leaf CSs issued so far; capped at ais_k_max so the union
+        # bound sum_pi delta_pi <= delta holds over every leaf ever bounded.
+        self._n_cs_issued = 0
+        self.ais_samples_used = 0
+        # Cache: canonical clause key -> clause has free variables.
+        self._clause_symbolic: dict[object, bool] = {}
+        # Per-leaf number of failures already used by the last CE fit.
+        self._ce_fail_used: dict[int, int] = {}
+        if self._ais:
+            if not 0.0 < config.ais_alpha <= 1.0:
+                raise ValueError("ais_alpha must be in (0, 1]")
+            if config.ais_k_max < 1:
+                raise ValueError("ais_k_max must be >= 1")
 
     # ------------------------------------------------------------------
     # Low-level helpers
@@ -199,8 +258,19 @@ class ASIPScheduler:
         return id(leaf)
 
     def _record_observation(
-        self, leaf: FrontierNode, result: ConcolicResult
+        self,
+        leaf: FrontierNode,
+        result: ConcolicResult,
+        weight: float = 1.0,
+        alpha: float = 1.0,
     ) -> None:
+        if self._ais:
+            # Feed the leaf's confidence sequence *before* the
+            # termination filter: dropping diverged runs would bias the
+            # CS, so a run that exceeded the branch budget counts as a
+            # failure (conservative for the reliability bound).
+            r = 0 if (result.terminated and result.phi_value) else 1
+            self._cs_observe(leaf, weight * r, alpha)
         if not result.terminated:
             return
         canonical = tuple(
@@ -255,6 +325,140 @@ class ASIPScheduler:
             n_run += 1
             target = self.frontier.find_leaf_for(x)
             self._record_observation(target, result)
+        return n_run
+
+    # ------------------------------------------------------------------
+    # Certified AIS (only reached when config.ais_enabled)
+    # ------------------------------------------------------------------
+
+    def _cs_observe(self, leaf: FrontierNode, z: float, alpha: float) -> None:
+        """Append one ``Z = W * R`` (cap ``1/alpha``) to ``leaf.ais_cs``.
+
+        The CS is created on the leaf's first observation with the fixed
+        a-priori budget ``delta / K_max``.  Once ``K_max`` CSs have been
+        issued, further leaves stay unbounded (``[0, 1]`` in Def. 6).
+        Plain ``D|_R`` observations enter with ``alpha = 1`` (``W = 1``),
+        for which the CS reduces to a Bernoulli betting CS.
+        """
+        if leaf.ais_cs is None:
+            if self._n_cs_issued >= self.config.ais_k_max:
+                return
+            from ..ais import OffPolicyBettingCS
+
+            leaf.ais_cs = OffPolicyBettingCS(
+                delta=self.config.delta / self.config.ais_k_max,
+                mode=self.config.ais_mode,
+            )
+            self._n_cs_issued += 1
+        leaf.ais_cs.update([z], alpha)
+
+    def _is_symbolic_clause(self, clause: SMTExpr) -> bool:
+        """True iff ``clause`` mentions an input variable.  Ground clauses
+        (``const op const``, emitted after a concretization) never make
+        refinement progress: one child is EMPTY, the other is the parent."""
+        key = self.smt.canonical_key(clause)
+        hit = self._clause_symbolic.get(key)
+        if hit is None:
+            hit = len(self.smt.free_vars(clause)) > 0
+            self._clause_symbolic[key] = hit
+        return hit
+
+    def _ais_box(self, leaf: FrontierNode) -> dict[str, tuple[int, int]] | None:
+        from ..ais import box_bounds_for_region
+
+        return box_bounds_for_region(leaf.region, self.distribution)
+
+    def _is_unclosable(self, leaf: FrontierNode, has_refine: bool) -> bool:
+        """Sticky detection of leaves Z3 cannot close.
+
+        A leaf is unclosable once any of these holds:
+
+        * an observation crossed a concretization point (``try_close``
+          will refuse forever);
+        * the SMT backend answered ``unknown`` on closure
+          ``ais_unknown_threshold`` times;
+        * it sits at ``max_refinement_depth``;
+        * it has ``closure_min_samples`` observations, is still OPEN after
+          the closure attempt, and no symbolic clause is left to refine on.
+        """
+        if leaf.is_unclosable:
+            return True
+        if leaf.n_samples == 0:
+            return False
+        cfg = self.config
+        if (
+            leaf.has_concretized_obs
+            or leaf.closure_unknown_count >= cfg.ais_unknown_threshold
+            or leaf.depth >= cfg.max_refinement_depth
+            or (leaf.n_samples >= cfg.closure_min_samples and not has_refine)
+        ):
+            leaf.is_unclosable = True
+        return leaf.is_unclosable
+
+    def _allocate_ais_batch(self, leaf: FrontierNode, k: int) -> int:
+        """One AIS batch in an unclosable leaf.
+
+        1. Fit the proposal (CE) *strictly from earlier batches*.
+        2. Draw ``k`` points from ``q_t = alpha D|_R + (1-alpha) q~_eta``.
+        3. Run ``P`` concolically; record ``Z = W R`` (cap ``1/alpha``)
+           in ``leaf.ais_cs`` and the usual FrontierNode statistics.
+        Returns the number of concolic runs performed.
+        """
+        if leaf.status != Status.OPEN:
+            return 0
+        remaining = self._budget_remaining()
+        if remaining is not None:
+            if remaining <= 0:
+                return 0
+            k = min(k, remaining)
+        box = self._ais_box(leaf)
+        if box is None:
+            return self._allocate_one_batch(leaf, k)
+        from ..ais import TwistedBGProposal
+
+        key = self._leaf_key(leaf)
+        if leaf.ais_proposal is None:
+            # Bootstrap tilt: uniform on the box (r_i = 1), inside the
+            # defensive mixture -- explores the low-probability tail.
+            leaf.ais_proposal = TwistedBGProposal(
+                self.distribution, box, alpha=self.config.ais_alpha
+            )
+            self._ce_fail_used[key] = 0
+        prop = leaf.ais_proposal
+        # Predictable CE update: uses only failures from batches 1..b-1.
+        n_fail = len(leaf.ais_fail_w)
+        if prop.alpha < 1.0 and n_fail > self._ce_fail_used.get(key, 0):
+            prop.update_ce(
+                np.vstack(leaf.ais_fail_x),
+                np.asarray(leaf.ais_fail_w),
+                rho=self.config.ais_ce_rho,
+            )
+            self._ce_fail_used[key] = n_fail
+        draw = prop.sample(self.rng, k)
+        alpha = draw.alpha
+        n_run = 0
+        new_fail_x: list[np.ndarray] = []
+        new_fail_w: list[float] = []
+        for i, x in enumerate(draw.assignments()):
+            remaining = self._budget_remaining()
+            if remaining is not None and remaining <= 0:
+                break
+            if self._time_exhausted():
+                break
+            result = self._run_concolic(x)
+            self.samples_used += 1
+            self.ais_samples_used += 1
+            n_run += 1
+            w = float(draw.weights[i])
+            self._record_observation(leaf, result, weight=w, alpha=alpha)
+            failed = not (result.terminated and result.phi_value)
+            if failed:
+                new_fail_x.append(draw.x[i].astype(np.float64))
+                new_fail_w.append(w)
+        # Failures become visible to the CE fit only after the batch.
+        leaf.ais_fail_x.extend(new_fail_x)
+        leaf.ais_fail_w.extend(new_fail_w)
+        leaf.n_ais_samples += n_run
         return n_run
 
     # ------------------------------------------------------------------
@@ -335,6 +539,11 @@ class ASIPScheduler:
         for path, can in zip(paths, canonical_paths, strict=True):
             for k in range(len(path)):
                 if can[k] in in_formula:
+                    continue
+                # AIS mode only: skip ground clauses (no free variables),
+                # which can never split a region.  Baseline behaviour is
+                # left untouched.
+                if self._ais and not self._is_symbolic_clause(path[k].clause_taken):
                     continue
                 candidates.setdefault(can[k], path[k].clause_taken)
         if not candidates:
@@ -448,41 +657,69 @@ class ASIPScheduler:
             if w <= 0.0:
                 continue
 
-            # Allocate: reduce eps_stat.
-            hw_now = self._leaf_hw_proxy(leaf, n)
-            hw_next = self._leaf_hw_proxy(leaf, n + k)
-            alloc_gain = w * max(0.0, hw_now - hw_next)
-            actions.append(
-                _Action(
-                    kind="allocate",
-                    leaf=leaf,
-                    expected_gain=alloc_gain,
-                    cost=float(k),
-                    k=k,
-                )
-            )
-
             # Refine: reduce W_open. Available whenever an observed path
             # supplies a branch clause past leaf.depth to split on, and
             # the depth cap allows. Refinement no longer waits for
             # sampled paths to diverge -- a single observed path's
             # clauses already partition the leaf, the common case once
             # the input distribution concentrates mass on one path.
+            refine_action: _Action | None = None
             if leaf.depth < self.config.max_refinement_depth:
                 paths = self._leaf_paths.get(self._leaf_key(leaf), [])
                 phis = self._leaf_path_phis.get(self._leaf_key(leaf), [])
                 if paths:
                     clause, _ = self._best_refinement_clause(leaf, paths, phis)
                     if clause is not None:
-                        actions.append(
-                            _Action(
-                                kind="refine",
-                                leaf=leaf,
-                                expected_gain=w,
-                                cost=self.config.refinement_cost_in_samples,
-                                clause=clause,
-                            )
+                        refine_action = _Action(
+                            kind="refine",
+                            leaf=leaf,
+                            expected_gain=w,
+                            cost=self.config.refinement_cost_in_samples,
+                            clause=clause,
                         )
+
+            ais_action: _Action | None = None
+            if (
+                self._ais
+                and self._is_unclosable(leaf, has_refine=refine_action is not None)
+                and leaf.ais_cs is not None
+                and self._ais_box(leaf) is not None
+            ):
+                # AIS allocate: priced by the predicted drop in the leaf's
+                # certified contribution w_pi * (U_pi - L_pi), using the
+                # ~1/sqrt(n) shrinkage heuristic (ranking only).
+                k_ais = self.config.ais_batch_size or k
+                cs = leaf.ais_cs
+                lo_f, hi_f = cs.bounds()
+                width = max(hi_f - lo_f, 0.0)
+                n_cs = cs.n
+                shrink = 1.0 - (n_cs / (n_cs + k_ais)) ** 0.5 if n_cs > 0 else 1.0
+                ais_action = _Action(
+                    kind="ais_allocate",
+                    leaf=leaf,
+                    expected_gain=w * width * shrink,
+                    cost=float(k_ais),
+                    k=k_ais,
+                )
+
+            if ais_action is not None:
+                actions.append(ais_action)
+            else:
+                # Allocate: reduce eps_stat.
+                hw_now = self._leaf_hw_proxy(leaf, n)
+                hw_next = self._leaf_hw_proxy(leaf, n + k)
+                alloc_gain = w * max(0.0, hw_now - hw_next)
+                actions.append(
+                    _Action(
+                        kind="allocate",
+                        leaf=leaf,
+                        expected_gain=alloc_gain,
+                        cost=float(k),
+                        k=k,
+                    )
+                )
+            if refine_action is not None:
+                actions.append(refine_action)
         return actions
 
     def _pick_best_action(self, actions: list[_Action]) -> _Action | None:
@@ -509,8 +746,17 @@ class ASIPScheduler:
             n = min(n, self.config.budget_samples)
         self._allocate_one_batch(self.frontier.root, n)
 
+    def _estimate(self) -> EstimatorState:
+        return compute_estimator_state(
+            self.frontier,
+            self.config.delta,
+            method=self.config.estimator_method,  # type: ignore[arg-type]
+            k_max=self.config.ais_k_max,
+            threshold_tau=self.config.threshold_tau,
+        )
+
     def _should_terminate(self) -> tuple[bool, EstimatorState]:
-        state = compute_estimator_state(self.frontier, self.config.delta, method=self.config.method)
+        state = self._estimate()
         if (
             self.config.budget_samples is not None
             and self.samples_used >= self.config.budget_samples
@@ -520,7 +766,18 @@ class ASIPScheduler:
         if self._time_exhausted():
             self.terminated_reason = "time_exhausted"
             return True, state
-        if state.eps_stat + state.W_open <= self.config.epsilon:
+        if state.decision == "VERIFIED":
+            self.terminated_reason = "threshold_verified"
+            return True, state
+        if state.decision == "FALSIFIED":
+            self.terminated_reason = "threshold_falsified"
+            return True, state
+        if self._ais:
+            # Definition-6 stopping rule: (U - L) / 2 <= epsilon.
+            if state.half_width <= self.config.epsilon:
+                self.terminated_reason = "epsilon_reached"
+                return True, state
+        elif state.eps_stat + state.W_open <= self.config.epsilon:
             self.terminated_reason = "epsilon_reached"
             return True, state
         return False, state
@@ -570,13 +827,15 @@ class ASIPScheduler:
                 break
             if best.kind == "allocate":
                 self._allocate_one_batch(best.leaf, best.k)
+            elif best.kind == "ais_allocate":
+                self._allocate_ais_batch(best.leaf, best.k)
             else:
                 assert best.clause is not None
                 self._execute_refine(best.leaf, best.clause)
             self._try_close_all()
             self._log_iteration(iter_idx, best, state)
 
-        final_state = compute_estimator_state(self.frontier, self.config.delta, method=self.config.method)
+        final_state = self._estimate()
         return SchedulerResult(
             final_estimator=final_state,
             iterations=self.iterations,
@@ -585,6 +844,8 @@ class ASIPScheduler:
             smt_calls=self.smt_calls,
             terminated_reason=self.terminated_reason,
             frontier=self.frontier,
+            ais_samples_used=self.ais_samples_used,
+            decision=final_state.decision,
         )
 
 
